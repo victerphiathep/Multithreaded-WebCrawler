@@ -8,10 +8,16 @@
 
 // Non starter code libraries
 #include <curl/curl.h>
+#include <stdbool.h>
+#include <gumbo.h>
+
+//#define MAX_DEPTH 3
+#define USER_AGENT "Mozilla/5.0 (compatible; MiniCrawler/1.0; +http://example.com/bot)"
 
 // Define a structure for queue elements.
 typedef struct URLQueueNode {
     char *url;
+    int depth;
     struct URLQueueNode *next;
 } URLQueueNode;
 
@@ -21,6 +27,18 @@ typedef struct {
     pthread_mutex_t lock;
 } URLQueue;
 
+// Structure to hold the response data
+typedef struct {
+    char *data;     // Response buffer
+    size_t size;    // Size of response
+} CurlResponse;
+
+typedef struct {
+    URLQueue *queue;
+    int max_depth;
+} ThreadArgs;
+
+
 // Initialize a URL queue.
 void initQueue(URLQueue *queue) {
     queue->head = queue->tail = NULL;
@@ -28,9 +46,18 @@ void initQueue(URLQueue *queue) {
 }
 
 // Add a URL to the queue.
-void enqueue(URLQueue *queue, const char *url) {
+void enqueue(URLQueue *queue, const char *url, int depth, int max_depth) {
+    if (depth > max_depth) {
+        return;
+    }
+
     URLQueueNode *newNode = malloc(sizeof(URLQueueNode));
+    if (!newNode) {
+        fprintf(stderr, "Failed to allocate memory for new queue node.\n");
+        return;
+    }
     newNode->url = strdup(url);
+    newNode->depth = depth;
     newNode->next = NULL;
 
     pthread_mutex_lock(&queue->lock);
@@ -44,100 +71,130 @@ void enqueue(URLQueue *queue, const char *url) {
 }
 
 // Remove a URL from the queue.
-char *dequeue(URLQueue *queue) {
+char *dequeue(URLQueue *queue, int *depth) {
     pthread_mutex_lock(&queue->lock);
-    if (queue->head == NULL) {
+    if (!queue->head) {
         pthread_mutex_unlock(&queue->lock);
         return NULL;
     }
-
     URLQueueNode *temp = queue->head;
     char *url = temp->url;
+    *depth = temp->depth;
     queue->head = queue->head->next;
-    if (queue->head == NULL) {
+    if (!queue->head) {
         queue->tail = NULL;
     }
-    free(temp);
     pthread_mutex_unlock(&queue->lock);
+    free(temp);
     return url;
 }
 
 // Placeholder for the function to fetch and process a URL.
+// Helper function to collect and concatenate text from HTML elements
+static void search_for_links(GumboNode* node, URLQueue* queue, int depth, int max_depth) {
+    if (node->type != GUMBO_NODE_ELEMENT) {
+        return;
+    }
+    GumboAttribute* href;
+    if (node->v.element.tag == GUMBO_TAG_A &&
+        (href = gumbo_get_attribute(&node->v.element.attributes, "href"))) {
+        printf("Found link: %s\n", href->value);
+        enqueue(queue, href->value, depth + 1, max_depth);
+    }
 
-// Function to handle the data received from HTTP requests
-size_t write_callback(void *contents, size_t size, size_t nmemb, void *userp) {
+    GumboVector* children = &node->v.element.children;
+    for (unsigned int i = 0; i < children->length; ++i) {
+        search_for_links(children->data[i], queue, depth + 1, max_depth);
+    }
+}
+
+// Callback Function
+
+static size_t write_callback(void *contents, size_t size, size_t nmemb, void *userp) {
     size_t real_size = size * nmemb;
-    // Append the data to a string or buffer (you need to define this part)
+    CurlResponse *mem = (CurlResponse *)userp;
+    char *ptr = realloc(mem->data, mem->size + real_size + 1);
+    if (!ptr) {
+        printf("not enough memory (realloc returned NULL)\n");
+        return 0;
+    }
+
+    mem->data = ptr;
+    memcpy(&(mem->data[mem->size]), contents, real_size);
+    mem->size += real_size;
+    mem->data[mem->size] = '\0';
     return real_size;
 }
 
+// Function to fetch and process a URL
 void *fetch_url(void *arg) {
-    // Cast arg to your queue or custom data structure.
-    URLQueue *queue = (URLQueue *)arg;
-    
-    // TODO: Implement fetching and processing logic here.
-    // This could involve sending HTTP requests, parsing HTML content to find links,
-    // and adding new URLs to the queue.
-    CURL *curl;
-    CURLcode res;
+    ThreadArgs *args = (ThreadArgs *)arg;
+    URLQueue *queue = args->queue;
+    int max_depth = args->max_depth;
+    CURL *curl = curl_easy_init();
+    if (curl) {
+        CurlResponse response = {0};
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, USER_AGENT);
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&response);
 
-    // Initialize CURL
-    curl = curl_easy_init();
-    if(curl) {
-        while (true) {
-            pthread_mutex_lock(&queue->lock);
-            if (queue->head == NULL) {
-                pthread_mutex_unlock(&queue->lock);
-                break;  // Exit if queue is empty
-            }
-            char *url = dequeue(queue);
-            pthread_mutex_unlock(&queue->lock);
-
-            if (url == NULL) {
-                continue;  // No URL fetched, skip this iteration
-            }
-
+        int depth;
+        char *url;
+        while ((url = dequeue(queue, &depth)) && depth <= max_depth) {
             curl_easy_setopt(curl, CURLOPT_URL, url);
-            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
-            // You need to define a buffer to store the fetched content
-            curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer);
-            
-            // Perform the request, res will get the return code
-            res = curl_easy_perform(curl);
-            if(res != CURLE_OK) {
+            CURLcode res = curl_easy_perform(curl);
+            if (res != CURLE_OK) {
                 fprintf(stderr, "curl_easy_perform() failed: %s\n", curl_easy_strerror(res));
             } else {
-                // Parse buffer here to find URLs and enqueue them
+                GumboOutput* output = gumbo_parse(response.data);
+                search_for_links(output->root, queue, depth, max_depth);
+                gumbo_destroy_output(&kGumboDefaultOptions, output);
             }
 
-            free(url);  // URL dequeued and processed, so free it
+            free(response.data);
+            response.data = NULL;
+            response.size = 0;
+            free(url);
         }
-
-        // Cleanup
         curl_easy_cleanup(curl);
     }
-
     return NULL;
 }
 
+
 // Main function to drive the web crawler.
 int main(int argc, char *argv[]) {
-    if (argc < 2) {
-        printf("Usage: %s <starting-url>\n", argv[0]);
+
+    // Getting user input
+
+    printf("Enter the starting URL (example format: https://example.com): ");
+    char starting_url[256];
+    if (scanf("%255s", starting_url) != 1) {
+        fprintf(stderr, "Error reading URL.\n");
         return 1;
     }
 
+    printf("Enter the maximum crawl depth: ");
+    int max_depth;
+    if (scanf("%d", &max_depth) != 1) {
+        fprintf(stderr, "Error reading maximum depth.\n");
+        return 1;
+    }
+
+
     URLQueue queue;
     initQueue(&queue);
-    enqueue(&queue, argv[1]);
+    enqueue(&queue, starting_url, 0, max_depth);
 
     // Placeholder for creating and joining threads.
     // You will need to create multiple threads and distribute the work of URL fetching among them.
     const int NUM_THREADS = 4; // Example thread count, adjust as needed.
     pthread_t threads[NUM_THREADS];
+    ThreadArgs args = { .queue = &queue, .max_depth = max_depth };
 
     for (int i = 0; i < NUM_THREADS; i++) {
-        pthread_create(&threads[i], NULL, fetch_url, (void *)&queue);
+        pthread_create(&threads[i], NULL, fetch_url, &args);
     }
 
     // Join threads after completion.
