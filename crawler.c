@@ -87,14 +87,17 @@ char *dequeue(URLQueue *queue, int *depth) {
 
 // Placeholder for the function to fetch and process a URL.
 // Helper function to collect and concatenate text from HTML elements
+// Helper function to collect and concatenate text from HTML elements
 void search_for_links(GumboNode* node, URLQueue* queue, int depth, int max_depth, int thread_num) {
     if (node->type != GUMBO_NODE_ELEMENT) {
         return;
     }
     GumboAttribute* href;
     if (node->v.element.tag == GUMBO_TAG_A && (href = gumbo_get_attribute(&node->v.element.attributes, "href"))) {
-        printf("Thread %d: Found link at depth %d: %s\n", thread_num, depth, href->value);
-        enqueue(queue, href->value, depth + 1, max_depth);
+        if (depth <= max_depth) {
+            printf("Thread %d: Found link at depth %d: %s\n", thread_num, depth, href->value);
+            enqueue(queue, href->value, depth + 1, max_depth);
+        }
     }
 
     GumboVector* children = &node->v.element.children;
