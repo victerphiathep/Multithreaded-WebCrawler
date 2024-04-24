@@ -162,12 +162,21 @@ void *fetch_url(void *arg) {
     return NULL;
 }
 
+// Function to free the URL queue
+void freeQueue(URLQueue *queue) {
+    URLQueueNode *current = queue->head;
+    while (current != NULL) {
+        URLQueueNode *temp = current;
+        current = current->next;
+        free(temp->url);  // Free the string allocated with strdup
+        free(temp);       // Free the node
+    }
+}
 
 // Main function to drive the web crawler.
 int main(int argc, char *argv[]) {
 
     // Getting user input
-
     printf("Enter the starting URL (example format: https://example.com): ");
     char starting_url[256];
     if (scanf("%255s", starting_url) != 1) {
@@ -181,7 +190,6 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Error reading maximum depth.\n");
         return 1;
     }
-
 
     URLQueue queue;
     initQueue(&queue);
@@ -204,6 +212,8 @@ int main(int argc, char *argv[]) {
 
     // Cleanup and program termination.
     // You may need to add additional cleanup logic here.
+    freeQueue(&queue);  // Free all nodes in the queue
+    pthread_mutex_destroy(&queue.lock);  // Destroy the mutex
     
     return 0;
 }
