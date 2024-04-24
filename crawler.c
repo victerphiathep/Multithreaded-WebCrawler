@@ -138,6 +138,39 @@ void freeQueue(URLQueue *queue) {
     pthread_mutex_destroy(&queue->lock);
 }
 
+char *resolve_url(const char *base_url, const char *relative_url) {
+    CURLU *curlu = curl_url(); // Initialize a CURLU handle
+    CURLUcode uc;
+    char *absolute_url = NULL;
+
+    if (!curlu) {
+        fprintf(stderr, "Failed to create CURLU handle.\n");
+        return NULL;
+    }
+
+    // Set the base URL in the CURLU handle
+    uc = curl_url_set(curlu, CURLUPART_URL, base_url, 0);
+    if (uc) {
+        fprintf(stderr, "Failed to set URL: %s\n", curl_url_strerror(uc));
+        curl_url_cleanup(curlu);
+        return NULL;
+    }
+
+    // Resolve the relative URL against the base URL
+    uc = curl_url_set(curlu, CURLUPART_URL, relative_url, CURLU_URLENCODE);
+    if (uc) {
+        fprintf(stderr, "Failed to resolve URL: %s\n", curl_url_strerror(uc));
+        curl_url_cleanup(curlu);
+        return NULL;
+    }
+
+    // Extract the absolute URL
+    curl_url_get(curlu, CURLUPART_URL, &absolute_url, 0);
+    curl_url_cleanup(curlu);
+
+    return absolute_url; // Caller must free this memory
+}
+
 // Function to fetch and process a URL
 void *fetch_url(void *arg) {
     ThreadArgs *args = (ThreadArgs *)arg;
@@ -151,40 +184,60 @@ void *fetch_url(void *arg) {
     printf("Thread %d starting with URL: %s\n", thread_num, args->start_url);
 
     CURL *curl = curl_easy_init();
-    if (curl) {
-        CurlResponse response = {0};
-        response.data = malloc(1);  
-        response.size = 0;         
-
-        curl_easy_setopt(curl, CURLOPT_USERAGENT, USER_AGENT);
-        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&response);
-
-        int depth;
-        char *url;
-        while ((url = dequeue(queue, &depth)) && depth <= max_depth) {
-            curl_easy_setopt(curl, CURLOPT_URL, url);
-            CURLcode res = curl_easy_perform(curl);
-            if (res != CURLE_OK) {
-                fprintf(stderr, "Thread %d: curl_easy_perform() failed: %s\n", thread_num, curl_easy_strerror(res));
-            } else {
-                GumboOutput* output = gumbo_parse(response.data);
-                search_for_links(output->root, queue, depth, max_depth, thread_num);
-                gumbo_destroy_output(&kGumboDefaultOptions, output);
-            }
-
-            free(response.data);
-            response.data = NULL;
-            response.size = 0;
-            free(url);
-        }
-        curl_easy_cleanup(curl);
+    if (!curl) {
+        fprintf(stderr, "Thread %d: Failed to init CURL\n", thread_num);
+        return NULL;
     }
 
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);  // Automatically follow redirects
+    curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);  // Enable verbose output for debugging
+
+    CurlResponse response = {0};
+    response.data = malloc(1);  // Initialize with dummy allocation to ensure it's never NULL
+    response.size = 0;
+
+    char *url;
+    int depth;
+
+    while ((url = dequeue(queue, &depth)) && depth <= max_depth) {
+        char *effective_url = resolve_url(args->start_url, url);
+        if (!effective_url) {
+            fprintf(stderr, "Thread %d: Invalid URL format %s\n", thread_num, url);
+            free(url);
+            continue;
+        }
+
+        curl_easy_setopt(curl, CURLOPT_URL, effective_url);
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, USER_AGENT);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+
+        CURLcode res = curl_easy_perform(curl);
+        if (res != CURLE_OK) {
+            fprintf(stderr, "Thread %d: curl_easy_perform() failed: %s\n", thread_num, curl_easy_strerror(res));
+        } else {
+            GumboOutput* output = gumbo_parse(response.data);
+            if (output) {
+                search_for_links(output->root, queue, depth, max_depth, thread_num);
+                gumbo_destroy_output(&kGumboDefaultOptions, output);
+            } else {
+                fprintf(stderr, "Thread %d: Failed to parse HTML content\n", thread_num);
+            }
+        }
+
+        free(response.data);  // Free and reset after each URL is processed
+        response.data = malloc(1);  // Reallocate for the next URL
+        response.size = 0;
+
+        free(effective_url);
+        free(url);
+    }
+
+    curl_easy_cleanup(curl);
     printf("Thread %d finishing\n", thread_num);
     return NULL;
 }
+
 
 // Main function to drive the web crawler.
 int main(int argc, char *argv[]) {
@@ -202,7 +255,7 @@ int main(int argc, char *argv[]) {
     // First collect all URLs
     for (int i = 0; i < num_threads; i++) {
         args[i].start_url = malloc(256 * sizeof(char));
-        printf("Enter starting URL for thread %d: ", i + 1);
+        printf("Enter starting URL for thread  (https://example.com) %d: ", i + 1);
         scanf("%255s", args[i].start_url);
         args[i].max_depth = max_depth;
         args[i].thread_num = i + 1;
