@@ -14,7 +14,7 @@
 //#define MAX_DEPTH 3
 #define USER_AGENT "Mozilla/5.0 (compatible; MiniCrawler/1.0; +http://example.com/bot)"
 
-// Define a structure for queue elements.
+// Define a structure for queue elements.// Define a structure for queue elements.
 typedef struct URLQueueNode {
     char *url;
     int depth;
@@ -25,7 +25,6 @@ typedef struct URLQueueNode {
 typedef struct {
     URLQueueNode *head, *tail;
     pthread_mutex_t lock;
-    pthread_cond_t cond;  // Condition variable for signaling
 } URLQueue;
 
 // Structure to hold the response data
@@ -34,12 +33,13 @@ typedef struct {
     size_t size;    // Size of response
 } CurlResponse;
 
+// Thread arguments structure
 typedef struct {
-    URLQueue *queue;
+    URLQueue queue;
     int max_depth;
     int thread_num;
+    char *start_url;
 } ThreadArgs;
-
 
 // Initialize a URL queue.
 void initQueue(URLQueue *queue) {
@@ -49,15 +49,9 @@ void initQueue(URLQueue *queue) {
 
 // Add a URL to the queue.
 void enqueue(URLQueue *queue, const char *url, int depth, int max_depth) {
-    if (depth > max_depth) {
-        return;
-    }
+    if (depth > max_depth) return;
 
     URLQueueNode *newNode = malloc(sizeof(URLQueueNode));
-    if (!newNode) {
-        fprintf(stderr, "Failed to allocate memory for new queue node.\n");
-        return;
-    }
     newNode->url = strdup(url);
     newNode->depth = depth;
     newNode->next = NULL;
@@ -93,13 +87,12 @@ char *dequeue(URLQueue *queue, int *depth) {
 
 // Placeholder for the function to fetch and process a URL.
 // Helper function to collect and concatenate text from HTML elements
-static void search_for_links(GumboNode* node, URLQueue* queue, int depth, int max_depth, int thread_num) {
+void search_for_links(GumboNode* node, URLQueue* queue, int depth, int max_depth, int thread_num) {
     if (node->type != GUMBO_NODE_ELEMENT) {
         return;
     }
     GumboAttribute* href;
-    if (node->v.element.tag == GUMBO_TAG_A &&
-        (href = gumbo_get_attribute(&node->v.element.attributes, "href"))) {
+    if (node->v.element.tag == GUMBO_TAG_A && (href = gumbo_get_attribute(&node->v.element.attributes, "href"))) {
         printf("Thread %d: Found link at depth %d: %s\n", thread_num, depth, href->value);
         enqueue(queue, href->value, depth + 1, max_depth);
     }
@@ -112,7 +105,7 @@ static void search_for_links(GumboNode* node, URLQueue* queue, int depth, int ma
 
 // Callback Function
 
-static size_t write_callback(void *contents, size_t size, size_t nmemb, void *userp) {
+size_t write_callback(void *contents, size_t size, size_t nmemb, void *userp) {
     size_t real_size = size * nmemb;
     CurlResponse *mem = (CurlResponse *)userp;
     char *ptr = realloc(mem->data, mem->size + real_size + 1);
@@ -128,18 +121,38 @@ static size_t write_callback(void *contents, size_t size, size_t nmemb, void *us
     return real_size;
 }
 
+// Free the URL queue
+void freeQueue(URLQueue *queue) {
+    pthread_mutex_lock(&queue->lock);
+    URLQueueNode *current = queue->head;
+    while (current != NULL) {
+        URLQueueNode *temp = current;
+        current = current->next;
+        free(temp->url);
+        free(temp);
+    }
+    pthread_mutex_unlock(&queue->lock);
+    pthread_mutex_destroy(&queue->lock);
+}
+
 // Function to fetch and process a URL
 void *fetch_url(void *arg) {
     ThreadArgs *args = (ThreadArgs *)arg;
     int thread_num = args->thread_num;
-    URLQueue *queue = args->queue;
+    URLQueue *queue = &args->queue;
     int max_depth = args->max_depth;
 
-    printf("Thread %d starting\n", thread_num);
+    initQueue(queue);
+    enqueue(queue, args->start_url, 0, max_depth);
+
+    printf("Thread %d starting with URL: %s\n", thread_num, args->start_url);
 
     CURL *curl = curl_easy_init();
     if (curl) {
         CurlResponse response = {0};
+        response.data = malloc(1);  
+        response.size = 0;         
+
         curl_easy_setopt(curl, CURLOPT_USERAGENT, USER_AGENT);
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
@@ -170,70 +183,42 @@ void *fetch_url(void *arg) {
     return NULL;
 }
 
-// Function to free the URL queue
-void freeQueue(URLQueue *queue) {
-    URLQueueNode *current = queue->head;
-    while (current != NULL) {
-        URLQueueNode *temp = current;
-        current = current->next;
-        free(temp->url);  // Free the string allocated with strdup
-        free(temp);       // Free the node
-    }
-}
-
 // Main function to drive the web crawler.
 int main(int argc, char *argv[]) {
-
-    // Getting user input
-
-    printf("Enter the starting URL (example format: https://example.com): ");
-    char starting_url[256];
-    if (scanf("%255s", starting_url) != 1) {
-        fprintf(stderr, "Error reading URL.\n");
-        return 1;
-    }
+    int num_threads;
+    printf("Enter the number of threads to use: ");
+    scanf("%d", &num_threads);
 
     printf("Enter the maximum crawl depth: ");
     int max_depth;
-    if (scanf("%d", &max_depth) != 1) {
-        fprintf(stderr, "Error reading maximum depth.\n");
-        return 1;
-    }
+    scanf("%d", &max_depth);
 
-    int NUM_THREADS;
-    printf("Enter the number of threads to use: ");
-    if (scanf("%d", &NUM_THREADS) != 1) {
-        fprintf(stderr, "Error reading number of threads.\n");
-        return 1;
-    }
+    ThreadArgs *args = malloc(num_threads * sizeof(ThreadArgs));
+    pthread_t *threads = malloc(num_threads * sizeof(pthread_t));
 
-    // Placeholder for creating and joining threads.
-    // You will need to create multiple threads and distribute the work of URL fetching among them.
-    // Example thread count, adjust as needed.
-    URLQueue queue;
-    initQueue(&queue);
-    enqueue(&queue, starting_url, 0, max_depth);
-
-    pthread_t *threads = malloc(NUM_THREADS * sizeof(pthread_t));
-    ThreadArgs *args = malloc(NUM_THREADS * sizeof(ThreadArgs));
-
-    for (int i = 0; i < NUM_THREADS; i++) {
-        args[i].queue = &queue;
+    // First collect all URLs
+    for (int i = 0; i < num_threads; i++) {
+        args[i].start_url = malloc(256 * sizeof(char));
+        printf("Enter starting URL for thread %d: ", i + 1);
+        scanf("%255s", args[i].start_url);
         args[i].max_depth = max_depth;
         args[i].thread_num = i + 1;
+    }
+
+    // Now start all threads
+    for (int i = 0; i < num_threads; i++) {
         pthread_create(&threads[i], NULL, fetch_url, &args[i]);
     }
 
-    for (int i = 0; i < NUM_THREADS; i++) {
+    for (int i = 0; i < num_threads; i++) {
         pthread_join(threads[i], NULL);
+        free(args[i].start_url);
     }
 
-    // Cleanup and program termination.
-    // You may need to add additional cleanup logic here.
-    freeQueue(&queue);  // Free all nodes in the queue
-    pthread_mutex_destroy(&queue.lock);  // Destroy the mutex
+    free(args);
+    free(threads);
 
-    printf("All threads completed. Queue freed and mutex destroyed.\n");
-    
+    printf("All threads completed.\n");
+
     return 0;
 }
