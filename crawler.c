@@ -207,17 +207,23 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    printf("Enter the maximum crawl depth: ");
-    int max_depth;
-    if (scanf("%d", &max_depth) != 1) {
-        fprintf(stderr, "Error reading maximum depth.\n");
+    // Validate URL format
+    if (strncmp(starting_url, "http://", 7) != 0 && strncmp(starting_url, "https://", 8) != 0) {
+        fprintf(stderr, "Invalid URL format. URL should start with 'http://' or 'https://'.\n");
         return 1;
     }
 
-    int NUM_THREADS;
+    printf("Enter the maximum crawl depth: ");
+    int max_depth;
+    if (scanf("%d", &max_depth) != 1 || max_depth < 0) {
+        fprintf(stderr, "Invalid maximum depth. Please enter a non-negative integer.\n");
+        return 1;
+    }
+
     printf("Enter the number of threads to use (Do not go over CPU CORES): ");
-    if (scanf("%d", &NUM_THREADS) != 1) {
-        fprintf(stderr, "Error reading number of threads.\n");
+    int NUM_THREADS;
+    if (scanf("%d", &NUM_THREADS) != 1 || NUM_THREADS <= 0) {
+        fprintf(stderr, "Invalid number of threads. Please enter a positive integer.\n");
         return 1;
     }
 
